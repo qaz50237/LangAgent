@@ -1,15 +1,44 @@
 """
 Streamlit UI
-提供互動式介面來測試 Agent
+提供互動式介面來測試 Agent，支援多種 Agent 選擇
 """
 
 import streamlit as st
-import requests
 from typing import Optional
 import uuid
 
-# API 設定
-API_BASE_URL = "http://localhost:8000"
+# Agent 模組
+from src.agent import LangGraphAgent, SYSTEM_PROMPT
+from src.meeting_room import create_meeting_room_agent
+
+
+# ============================================================
+# Agent 配置
+# ============================================================
+AGENT_OPTIONS = {
+    "general": {
+        "name": "🤖 通用 AI 助理",
+        "description": "多功能助理，支援時間查詢、計算、天氣、單位轉換等",
+        "examples": [
+            "現在幾點？",
+            "計算 sqrt(144) + 25 * 2",
+            "台北今天天氣如何？",
+            "把 100 公里轉換成英里",
+            "什麼是 LangChain？",
+        ],
+    },
+    "meeting_room": {
+        "name": "🏢 會議室預約 Agent",
+        "description": "專門處理會議室查詢、預約、管理的智能助理（Supervisor 多 Agent 架構）",
+        "examples": [
+            "有哪些大樓可以預約？",
+            "查詢 A 棟明天的會議室",
+            "我要預約 A-101，明天 9:00-10:00，週會",
+            "查詢我的預約",
+            "取消預約 RES-001",
+        ],
+    },
+}
 
 
 def init_session_state():
@@ -18,65 +47,74 @@ def init_session_state():
         st.session_state.session_id = str(uuid.uuid4())[:8]
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    if "api_connected" not in st.session_state:
-        st.session_state.api_connected = False
+    if "current_agent_type" not in st.session_state:
+        st.session_state.current_agent_type = "general"
+    if "agent" not in st.session_state:
+        st.session_state.agent = None
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = "user001"
 
 
-def check_api_health() -> bool:
-    """檢查 API 是否可用"""
-    try:
-        response = requests.get(f"{API_BASE_URL}/health", timeout=5)
-        return response.status_code == 200 and response.json().get("agent_ready", False)
-    except:
-        return False
-
-
-def send_message(message: str, use_session: bool = True) -> Optional[str]:
-    """發送訊息到 API"""
-    try:
-        endpoint = "/chat" if use_session else "/chat/simple"
-        payload = {"message": message}
+def get_or_create_agent(agent_type: str, user_id: str = "user001"):
+    """取得或建立 Agent 實例"""
+    # 如果 Agent 類型改變，重新建立
+    if (st.session_state.agent is None or 
+        st.session_state.current_agent_type != agent_type):
         
-        if use_session:
-            payload["session_id"] = st.session_state.session_id
-        
-        response = requests.post(
-            f"{API_BASE_URL}{endpoint}",
-            json=payload,
-            timeout=60,
-        )
-        
-        if response.status_code == 200:
-            return response.json().get("response")
-        else:
-            st.error(f"API 錯誤: {response.status_code} - {response.text}")
+        try:
+            if agent_type == "general":
+                st.session_state.agent = LangGraphAgent()
+            elif agent_type == "meeting_room":
+                st.session_state.agent = create_meeting_room_agent(
+                    mode="multi", 
+                    user_id=user_id
+                )
+            st.session_state.current_agent_type = agent_type
+        except Exception as e:
+            st.error(f"建立 Agent 失敗: {str(e)}")
             return None
-    except requests.exceptions.ConnectionError:
-        st.error("無法連接到 API 伺服器。請確保 API 正在運行。")
-        return None
+    
+    return st.session_state.agent
+
+
+def send_message_direct(message: str, agent_type: str, user_id: str = "user001") -> Optional[str]:
+    """直接透過 Agent 發送訊息（不經過 API）"""
+    try:
+        agent = get_or_create_agent(agent_type, user_id)
+        if agent is None:
+            return None
+        
+        # 根據 Agent 類型調用對應方法
+        if agent_type == "meeting_room":
+            response = agent.chat(message, user_id=user_id)
+        else:
+            response = agent.chat(message)
+        
+        return response
     except Exception as e:
         st.error(f"發生錯誤: {str(e)}")
         return None
 
 
-def get_available_tools() -> list:
-    """取得可用工具列表"""
-    try:
-        response = requests.get(f"{API_BASE_URL}/tools", timeout=5)
-        if response.status_code == 200:
-            return response.json().get("tools", [])
-    except:
-        pass
-    return []
-
-
 def clear_conversation():
     """清除對話歷史"""
     st.session_state.messages = []
-    try:
-        requests.delete(f"{API_BASE_URL}/sessions/{st.session_state.session_id}", timeout=5)
-    except:
-        pass
+    # 重置 Agent 以清除內部狀態
+    st.session_state.agent = None
+
+
+def get_agent_tools(agent_type: str) -> list:
+    """取得 Agent 的工具列表"""
+    if agent_type == "general":
+        from src.tools import ALL_TOOLS
+        tools = ALL_TOOLS
+    elif agent_type == "meeting_room":
+        from src.meeting_room.tools import MEETING_ROOM_TOOLS
+        tools = MEETING_ROOM_TOOLS
+    else:
+        return []
+    
+    return [{"name": t.name, "description": t.description} for t in tools]
 
 
 def main():
@@ -97,67 +135,98 @@ def main():
     with st.sidebar:
         st.header("⚙️ 設定")
         
-        # API 狀態
-        api_status = check_api_health()
-        st.session_state.api_connected = api_status
+        # ========================================
+        # Agent 選擇
+        # ========================================
+        st.subheader("🎯 選擇 Agent")
         
-        if api_status:
-            st.success("✅ API 連線正常")
-        else:
-            st.error("❌ API 未連線")
-            st.info("請先啟動 API 伺服器:\n```\npython api.py\n```")
+        selected_agent = st.selectbox(
+            "Agent 類型",
+            options=list(AGENT_OPTIONS.keys()),
+            format_func=lambda x: AGENT_OPTIONS[x]["name"],
+            key="agent_selector",
+        )
+        
+        # 顯示 Agent 描述
+        st.info(AGENT_OPTIONS[selected_agent]["description"])
+        
+        # 如果切換了 Agent，清除對話
+        if selected_agent != st.session_state.current_agent_type:
+            st.session_state.messages = []
+            st.session_state.agent = None
+            st.session_state.current_agent_type = selected_agent
         
         st.divider()
         
-        # 會話資訊
+        # ========================================
+        # 用戶設定（會議室 Agent 專用）
+        # ========================================
+        if selected_agent == "meeting_room":
+            st.subheader("👤 用戶設定")
+            user_id = st.text_input(
+                "用戶 ID",
+                value=st.session_state.user_id,
+                help="用於識別預約記錄的用戶ID"
+            )
+            if user_id != st.session_state.user_id:
+                st.session_state.user_id = user_id
+                # 重建 Agent 以使用新的 user_id
+                st.session_state.agent = None
+            
+            st.divider()
+        
+        # ========================================
+        # 會話管理
+        # ========================================
         st.subheader("📝 會話資訊")
         st.text(f"會話 ID: {st.session_state.session_id}")
+        if selected_agent == "meeting_room":
+            st.text(f"用戶 ID: {st.session_state.user_id}")
         
-        # 清除對話按鈕
-        if st.button("🗑️ 清除對話", use_container_width=True):
-            clear_conversation()
-            st.rerun()
-        
-        # 新會話按鈕
-        if st.button("🔄 開始新會話", use_container_width=True):
-            st.session_state.session_id = str(uuid.uuid4())[:8]
-            st.session_state.messages = []
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ 清除", use_container_width=True):
+                clear_conversation()
+                st.rerun()
+        with col2:
+            if st.button("🔄 新會話", use_container_width=True):
+                st.session_state.session_id = str(uuid.uuid4())[:8]
+                clear_conversation()
+                st.rerun()
         
         st.divider()
         
+        # ========================================
         # 可用工具
+        # ========================================
         st.subheader("🛠️ 可用工具")
-        if api_status:
-            tools = get_available_tools()
-            if tools:
-                for tool in tools:
-                    with st.expander(f"📌 {tool['name']}"):
-                        st.write(tool['description'])
-            else:
-                st.info("無法取得工具列表")
-        else:
-            st.info("請先連接 API")
+        tools = get_agent_tools(selected_agent)
+        if tools:
+            for tool in tools:
+                with st.expander(f"📌 {tool['name']}"):
+                    st.write(tool['description'])
         
         st.divider()
         
+        # ========================================
         # 範例問題
+        # ========================================
         st.subheader("💡 試試這些問題")
-        example_questions = [
-            "現在幾點？",
-            "計算 sqrt(144) + 25 * 2",
-            "台北今天天氣如何？",
-            "把 100 公里轉換成英里",
-            "什麼是 LangChain？",
-            "幫我把攝氏 30 度轉成華氏",
-        ]
+        examples = AGENT_OPTIONS[selected_agent]["examples"]
         
-        for q in example_questions:
+        for q in examples:
             if st.button(q, key=f"example_{q}", use_container_width=True):
                 st.session_state.pending_message = q
                 st.rerun()
     
+    # ========================================
     # 主要對話區域
+    # ========================================
+    
+    # 顯示當前使用的 Agent
+    agent_info = AGENT_OPTIONS[selected_agent]
+    st.caption(f"當前使用: {agent_info['name']}")
+    
     # 顯示對話歷史
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
@@ -177,7 +246,11 @@ def main():
         # 取得 AI 回應
         with st.chat_message("assistant"):
             with st.spinner("思考中..."):
-                response = send_message(pending)
+                response = send_message_direct(
+                    pending, 
+                    selected_agent,
+                    st.session_state.user_id
+                )
                 if response:
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
@@ -185,7 +258,7 @@ def main():
                     st.error("無法取得回應")
     
     # 輸入框
-    if prompt := st.chat_input("輸入您的問題...", disabled=not st.session_state.api_connected):
+    if prompt := st.chat_input("輸入您的問題..."):
         # 添加用戶訊息
         st.session_state.messages.append({"role": "user", "content": prompt})
         
@@ -195,7 +268,11 @@ def main():
         # 取得 AI 回應
         with st.chat_message("assistant"):
             with st.spinner("思考中..."):
-                response = send_message(prompt)
+                response = send_message_direct(
+                    prompt, 
+                    selected_agent,
+                    st.session_state.user_id
+                )
                 if response:
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
@@ -210,7 +287,7 @@ def main():
     with col2:
         st.caption("📊 基於 LangChain & LangGraph")
     with col3:
-        st.caption("🛠️ 支援 Function Tools / MCP")
+        st.caption("🛠️ 支援多 Agent 系統")
 
 
 if __name__ == "__main__":
