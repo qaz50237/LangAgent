@@ -54,6 +54,10 @@ def init_session_state():
         st.session_state.agent = None
     if "user_id" not in st.session_state:
         st.session_state.user_id = "user001"
+    if "trace_mode" not in st.session_state:
+        st.session_state.trace_mode = False
+    if "execution_traces" not in st.session_state:
+        st.session_state.execution_traces = {}
 
 
 def get_or_create_agent(agent_type: str, user_id: str = "user001"):
@@ -95,6 +99,101 @@ def send_message_direct(message: str, agent_type: str, user_id: str = "user001")
     except Exception as e:
         st.error(f"發生錯誤: {str(e)}")
         return None
+
+
+def send_message_with_trace(message: str, agent_type: str, user_id: str = "user001", trace_container=None):
+    """
+    發送訊息並即時追蹤執行過程
+    
+    Returns:
+        tuple: (最終回應, 執行步驟列表)
+    """
+    try:
+        agent = get_or_create_agent(agent_type, user_id)
+        if agent is None:
+            return None, []
+        
+        steps = []
+        final_response = None
+        
+        # 建立執行追蹤的 UI 元素
+        if trace_container:
+            trace_container.markdown("### 🔄 執行追蹤")
+        
+        # 使用 streaming 方法
+        if agent_type == "meeting_room":
+            stream = agent.chat_stream(message, user_id=user_id)
+        else:
+            stream = agent.chat_stream(message)
+        
+        step_count = 0
+        for step in stream:
+            step_count += 1
+            steps.append(step)
+            
+            # 更新最終回應
+            if step.get("output") and step["output"] != "(調用工具中...)":
+                final_response = step["output"]
+            
+            # 即時顯示在 trace_container
+            if trace_container:
+                with trace_container:
+                    render_step(step, step_count)
+        
+        return final_response, steps
+    except Exception as e:
+        st.error(f"發生錯誤: {str(e)}")
+        return None, []
+
+
+def render_step(step: dict, step_number: int):
+    """渲染單一執行步驟"""
+    node_name = step.get("node", "unknown")
+    timestamp = step.get("timestamp", "")
+    
+    # 節點圖示對應
+    node_icons = {
+        "agent": "🤖",
+        "tools": "🔧",
+        "supervisor": "👨‍💼",
+        "booking_agent": "📅",
+        "query_agent": "🔍",
+        "management_agent": "📋",
+        "booking_tools": "🔧",
+        "query_tools": "🔧",
+        "management_tools": "🔧",
+    }
+    icon = node_icons.get(node_name, "⚙️")
+    
+    # 使用 expander 顯示步驟詳情
+    with st.expander(f"{icon} Step {step_number}: **{node_name}**", expanded=True):
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            st.caption(f"⏱️ {timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp}")
+        
+        # 顯示意圖（如果有）
+        if step.get("intent"):
+            st.info(f"🎯 意圖: `{step['intent']}`")
+        
+        if step.get("current_agent"):
+            st.info(f"➡️ 路由至: `{step['current_agent']}`")
+        
+        # 顯示工具調用
+        if step.get("tool_calls"):
+            st.markdown("**📤 工具調用 (Input):**")
+            for tc in step["tool_calls"]:
+                st.code(f"🔧 {tc['name']}\n📥 參數: {tc['args']}", language="yaml")
+        
+        # 顯示工具結果
+        if step.get("tool_results"):
+            st.markdown("**📥 工具結果 (Output):**")
+            for tr in step["tool_results"]:
+                st.code(f"🔧 {tr['name']}\n📤 結果: {tr['result']}", language="yaml")
+        
+        # 顯示 AI 輸出
+        if step.get("output") and step["output"] != "(調用工具中...)":
+            st.markdown("**💬 AI 回應:**")
+            st.markdown(step["output"])
 
 
 def clear_conversation():
@@ -188,12 +287,30 @@ def main():
         with col1:
             if st.button("🗑️ 清除", use_container_width=True):
                 clear_conversation()
+                st.session_state.execution_traces = {}
                 st.rerun()
         with col2:
             if st.button("🔄 新會話", use_container_width=True):
                 st.session_state.session_id = str(uuid.uuid4())[:8]
                 clear_conversation()
+                st.session_state.execution_traces = {}
                 st.rerun()
+        
+        st.divider()
+        
+        # ========================================
+        # 執行追蹤模式
+        # ========================================
+        st.subheader("🔍 執行追蹤")
+        st.session_state.trace_mode = st.toggle(
+            "啟用即時追蹤",
+            value=st.session_state.trace_mode,
+            help="顯示 LangGraph 每個節點的執行狀態、輸入輸出"
+        )
+        
+        if st.session_state.trace_mode:
+            st.success("✅ 追蹤模式已啟用")
+            st.caption("將顯示每個步驟的詳細執行過程")
         
         st.divider()
         
@@ -288,9 +405,15 @@ def main():
         st.divider()
     
     # 顯示對話歷史
-    for msg in st.session_state.messages:
+    for idx, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            
+            # 如果有對應的執行追蹤，顯示展開按鈕
+            if msg["role"] == "assistant" and idx in st.session_state.execution_traces:
+                with st.expander("🔍 查看執行追蹤", expanded=False):
+                    for i, step in enumerate(st.session_state.execution_traces[idx], 1):
+                        render_step(step, i)
     
     # 處理待發送的範例訊息
     if hasattr(st.session_state, 'pending_message'):
@@ -305,17 +428,37 @@ def main():
         
         # 取得 AI 回應
         with st.chat_message("assistant"):
-            with st.spinner("思考中..."):
-                response = send_message_direct(
+            if st.session_state.trace_mode:
+                # 追蹤模式：即時顯示執行過程
+                trace_container = st.container()
+                response, steps = send_message_with_trace(
                     pending, 
                     selected_agent,
-                    st.session_state.user_id
+                    st.session_state.user_id,
+                    trace_container
                 )
                 if response:
+                    st.divider()
+                    st.markdown("### 💬 最終回應")
                     st.markdown(response)
+                    msg_idx = len(st.session_state.messages)
                     st.session_state.messages.append({"role": "assistant", "content": response})
+                    st.session_state.execution_traces[msg_idx] = steps
                 else:
                     st.error("無法取得回應")
+            else:
+                # 一般模式
+                with st.spinner("思考中..."):
+                    response = send_message_direct(
+                        pending, 
+                        selected_agent,
+                        st.session_state.user_id
+                    )
+                    if response:
+                        st.markdown(response)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                    else:
+                        st.error("無法取得回應")
     
     # 輸入框
     if prompt := st.chat_input("輸入您的問題..."):
@@ -327,17 +470,37 @@ def main():
         
         # 取得 AI 回應
         with st.chat_message("assistant"):
-            with st.spinner("思考中..."):
-                response = send_message_direct(
+            if st.session_state.trace_mode:
+                # 追蹤模式：即時顯示執行過程
+                trace_container = st.container()
+                response, steps = send_message_with_trace(
                     prompt, 
                     selected_agent,
-                    st.session_state.user_id
+                    st.session_state.user_id,
+                    trace_container
                 )
                 if response:
+                    st.divider()
+                    st.markdown("### 💬 最終回應")
                     st.markdown(response)
+                    msg_idx = len(st.session_state.messages)
                     st.session_state.messages.append({"role": "assistant", "content": response})
+                    st.session_state.execution_traces[msg_idx] = steps
                 else:
                     st.error("無法取得回應")
+            else:
+                # 一般模式
+                with st.spinner("思考中..."):
+                    response = send_message_direct(
+                        prompt, 
+                        selected_agent,
+                        st.session_state.user_id
+                    )
+                    if response:
+                        st.markdown(response)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                    else:
+                        st.error("無法取得回應")
     
     # 頁尾
     st.divider()

@@ -4,8 +4,8 @@
 支援靜態工具定義或 MCP 動態工具載入
 """
 
-from typing import Annotated, Sequence, TypedDict, Literal, Optional, List
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from typing import Annotated, Sequence, TypedDict, Literal, Optional, List, Generator
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langgraph.graph import StateGraph, END
@@ -361,6 +361,74 @@ class MeetingRoomAgent:
             Mermaid 格式字串
         """
         return self.graph.get_graph().draw_mermaid()
+    
+    def chat_stream(self, message: str, user_id: str = None, history: list[BaseMessage] = None) -> Generator[dict, None, None]:
+        """
+        串流執行對話，逐步輸出每個節點的執行狀態
+        
+        Args:
+            message: 用戶訊息
+            user_id: 用戶ID
+            history: 對話歷史
+        
+        Yields:
+            dict: 包含執行步驟資訊的字典
+        """
+        messages = history or []
+        messages.append(HumanMessage(content=message))
+        
+        initial_state = {
+            "messages": messages,
+            "user_id": user_id or self.default_user_id,
+            "intent": None,
+            "current_agent": None,
+            "context": None,
+        }
+        
+        # 使用 stream 方法逐步輸出
+        for event in self.graph.stream(initial_state, stream_mode="updates"):
+            for node_name, node_output in event.items():
+                step_info = {
+                    "node": node_name,
+                    "status": "completed",
+                    "timestamp": datetime.now().isoformat(),
+                    "input": None,
+                    "output": None,
+                    "messages": [],
+                    "tool_calls": [],
+                    "tool_results": [],
+                    "intent": node_output.get("intent"),
+                    "current_agent": node_output.get("current_agent"),
+                }
+                
+                # 解析輸出訊息
+                if "messages" in node_output:
+                    for msg in node_output["messages"]:
+                        if isinstance(msg, AIMessage):
+                            step_info["output"] = msg.content if msg.content else "(調用工具中...)"
+                            step_info["messages"].append({
+                                "type": "ai",
+                                "content": msg.content,
+                            })
+                            # 解析工具調用
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    step_info["tool_calls"].append({
+                                        "name": tc.get("name", "unknown"),
+                                        "args": tc.get("args", {}),
+                                    })
+                        elif isinstance(msg, ToolMessage):
+                            step_info["tool_results"].append({
+                                "name": msg.name,
+                                "result": msg.content[:500] if len(msg.content) > 500 else msg.content,
+                            })
+                            step_info["messages"].append({
+                                "type": "tool",
+                                "name": msg.name,
+                                "content": msg.content,
+                            })
+                
+                yield step_info
     
     def chat(self, message: str, user_id: str = None, history: list[BaseMessage] = None) -> str:
         """
