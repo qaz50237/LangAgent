@@ -130,6 +130,36 @@ class LangGraphAgent:
         # 編譯圖形
         return workflow.compile()
     
+    def get_graph_image(self, output_format: str = "png") -> bytes:
+        """
+        取得 LangGraph 工作流程圖的圖像
+        
+        Args:
+            output_format: 輸出格式 ("png", "ascii", "mermaid")
+        
+        Returns:
+            圖像的 bytes 資料，或 ASCII/Mermaid 字串
+        """
+        try:
+            if output_format == "ascii":
+                return self.graph.get_graph().draw_ascii()
+            elif output_format == "mermaid":
+                return self.graph.get_graph().draw_mermaid()
+            else:
+                # PNG 格式需要 grandalf 套件
+                return self.graph.get_graph().draw_mermaid_png()
+        except Exception as e:
+            raise RuntimeError(f"無法生成圖形: {str(e)}")
+    
+    def get_graph_mermaid(self) -> str:
+        """
+        取得 Mermaid 格式的圖形定義
+        
+        Returns:
+            Mermaid 格式字串
+        """
+        return self.graph.get_graph().draw_mermaid()
+    
     def chat(self, message: str, history: list[BaseMessage] = None) -> str:
         """
         與 Agent 對話

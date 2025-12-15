@@ -6,6 +6,7 @@ Streamlit UI
 import streamlit as st
 from typing import Optional
 import uuid
+import io
 
 # Agent 模組
 from src.agent import LangGraphAgent, SYSTEM_PROMPT
@@ -209,6 +210,16 @@ def main():
         st.divider()
         
         # ========================================
+        # LangGraph 視覺化
+        # ========================================
+        st.subheader("📊 LangGraph 視覺化")
+        
+        if st.button("🗺️ 顯示工作流程圖", use_container_width=True):
+            st.session_state.show_graph = True
+        
+        st.divider()
+        
+        # ========================================
         # 範例問題
         # ========================================
         st.subheader("💡 試試這些問題")
@@ -226,6 +237,55 @@ def main():
     # 顯示當前使用的 Agent
     agent_info = AGENT_OPTIONS[selected_agent]
     st.caption(f"當前使用: {agent_info['name']}")
+    
+    # ========================================
+    # 顯示 LangGraph 工作流程圖
+    # ========================================
+    if st.session_state.get("show_graph", False):
+        st.subheader("🗺️ LangGraph 工作流程圖")
+        
+        try:
+            agent = get_or_create_agent(selected_agent, st.session_state.user_id)
+            if agent:
+                # 建立分頁顯示不同格式
+                tab1, tab2, tab3 = st.tabs(["📷 PNG 圖片", "📝 Mermaid 程式碼", "🔤 ASCII"])
+                
+                with tab1:
+                    try:
+                        # 嘗試取得 PNG 圖片
+                        png_data = agent.get_graph_image("png")
+                        st.image(png_data, caption=f"{agent_info['name']} 工作流程圖")
+                    except Exception as e:
+                        st.warning(f"無法生成 PNG 圖片: {str(e)}")
+                        st.info("提示：PNG 渲染需要安裝額外套件，請使用 Mermaid 或 ASCII 格式查看")
+                
+                with tab2:
+                    try:
+                        # Mermaid 格式
+                        mermaid_code = agent.get_graph_mermaid()
+                        st.code(mermaid_code, language="mermaid")
+                        
+                        # 嘗試用 Streamlit 的 mermaid 功能渲染
+                        st.markdown("**渲染預覽：**")
+                        st.markdown(f"```mermaid\n{mermaid_code}\n```")
+                    except Exception as e:
+                        st.error(f"無法生成 Mermaid: {str(e)}")
+                
+                with tab3:
+                    try:
+                        # ASCII 格式
+                        ascii_graph = agent.get_graph_image("ascii")
+                        st.code(ascii_graph, language="text")
+                    except Exception as e:
+                        st.error(f"無法生成 ASCII: {str(e)}")
+        except Exception as e:
+            st.error(f"建立 Agent 失敗: {str(e)}")
+        
+        if st.button("❌ 關閉圖形", use_container_width=True):
+            st.session_state.show_graph = False
+            st.rerun()
+        
+        st.divider()
     
     # 顯示對話歷史
     for msg in st.session_state.messages:
