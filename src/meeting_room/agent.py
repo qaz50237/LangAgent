@@ -1,10 +1,12 @@
 """
 會議室預約 LangGraph Agent
 基於 Supervisor 模式的多 Agent 系統
+支援靜態工具定義或 MCP 動態工具載入
 """
 
-from typing import Annotated, Sequence, TypedDict, Literal, Optional
+from typing import Annotated, Sequence, TypedDict, Literal, Optional, List
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -20,6 +22,7 @@ from .tools import (
     MANAGEMENT_TOOLS,
     MEETING_ROOM_TOOLS,
 )
+from .tool_classifier import MCPToolClassifier, classify_mcp_tools
 from .prompts import (
     SUPERVISOR_SYSTEM_PROMPT,
     BOOKING_AGENT_SYSTEM_PROMPT,
@@ -63,6 +66,10 @@ class MeetingRoomAgent:
     - Booking Agent: 處理預約流程
     - Query Agent: 處理查詢請求
     - Management Agent: 處理預約管理（查看/取消）
+    
+    支援兩種工具來源:
+    1. 靜態定義 (預設): 使用 tools.py 中定義的工具
+    2. MCP 動態載入: 傳入 mcp_tools 參數，自動分類
     """
     
     def __init__(
@@ -70,16 +77,46 @@ class MeetingRoomAgent:
         model_name: str = "gpt-4o-mini",
         temperature: float = 0.7,
         user_id: str = "default_user",
+        mcp_tools: List[BaseTool] = None,
+        tool_classification_strategy: str = "explicit",
     ):
+        """
+        初始化會議室預約 Agent
+        
+        Args:
+            model_name: LLM 模型名稱
+            temperature: 生成溫度
+            user_id: 預設用戶 ID
+            mcp_tools: MCP 載入的工具列表（可選）。若提供，將自動分類
+            tool_classification_strategy: MCP 工具分類策略 
+                - "explicit": 根據配置檔分類（預設）
+                - "prefix": 根據工具名稱前綴
+                - "keyword": 根據描述關鍵字
+        """
         self.model_name = model_name
         self.temperature = temperature
         self.default_user_id = user_id
         
+        # 決定使用靜態工具還是 MCP 工具
+        if mcp_tools:
+            # MCP 模式：動態分類工具
+            classified = classify_mcp_tools(mcp_tools, strategy=tool_classification_strategy)
+            self.booking_tools = classified["booking"]
+            self.query_tools = classified["query"]
+            self.management_tools = classified["management"]
+            self.all_tools = mcp_tools
+        else:
+            # 靜態模式：使用預定義工具
+            self.booking_tools = BOOKING_TOOLS
+            self.query_tools = QUERY_TOOLS
+            self.management_tools = MANAGEMENT_TOOLS
+            self.all_tools = MEETING_ROOM_TOOLS
+        
         # 初始化各專業 Agent 的 LLM
         self.supervisor_llm = get_llm(model_name, temperature)
-        self.booking_llm = get_llm(model_name, temperature).bind_tools(BOOKING_TOOLS)
-        self.query_llm = get_llm(model_name, temperature).bind_tools(QUERY_TOOLS)
-        self.management_llm = get_llm(model_name, temperature).bind_tools(MANAGEMENT_TOOLS)
+        self.booking_llm = get_llm(model_name, temperature).bind_tools(self.booking_tools)
+        self.query_llm = get_llm(model_name, temperature).bind_tools(self.query_tools)
+        self.management_llm = get_llm(model_name, temperature).bind_tools(self.management_tools)
         
         # 建構 LangGraph 工作流
         self.graph = self._build_graph()
@@ -240,10 +277,10 @@ class MeetingRoomAgent:
         workflow.add_node("query_agent", query_agent_node)
         workflow.add_node("management_agent", management_agent_node)
         
-        # 添加工具節點
-        workflow.add_node("booking_tools", ToolNode(BOOKING_TOOLS))
-        workflow.add_node("query_tools", ToolNode(QUERY_TOOLS))
-        workflow.add_node("management_tools", ToolNode(MANAGEMENT_TOOLS))
+        # 添加工具節點（使用實例變數，支援 MCP 動態工具）
+        workflow.add_node("booking_tools", ToolNode(self.booking_tools))
+        workflow.add_node("query_tools", ToolNode(self.query_tools))
+        workflow.add_node("management_tools", ToolNode(self.management_tools))
         
         # 設定入口點
         workflow.set_entry_point("supervisor")
